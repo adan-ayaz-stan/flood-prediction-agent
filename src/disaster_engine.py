@@ -164,7 +164,48 @@ def astar(nodes, adj, start, goal):
     return None, float('inf')
 
 # ==========================================
-# 4. DISASTER AGENT CLASS
+# 4. NEW: KNOWLEDGE BASE ENGINE (FORWARD CHAINING)
+# ==========================================
+class ForwardChainingEngine:
+    def __init__(self, rules):
+        self.rules = rules
+
+    def infer(self, initial_facts):
+        inferred_facts = set(initial_facts)
+        trace_log = []
+        
+        changed = True
+        while changed:
+            changed = False
+            for rule in self.rules:
+                if all(condition in inferred_facts for condition in rule['if']):
+                    if rule['then'] not in inferred_facts:
+                        inferred_facts.add(rule['then'])
+                        trace_log.append(f"Fired Rule: {rule['name']} -> '{rule['then']}'")
+                        changed = True
+                        
+        return inferred_facts, trace_log
+
+# 13 Expert Domain Rules for Earthquake Response
+EARTHQUAKE_RULES = [
+    {"name": "Rule 1", "if": ["high_magnitude", "shallow_depth"], "then": "severe_surface_shaking"},
+    {"name": "Rule 2", "if": ["low_magnitude", "low_population_density"], "then": "predicted_threat_level_is_low"},
+    {"name": "Rule 3", "if": ["over_water", "severe_surface_shaking"], "then": "tsunami_warning_active"},
+    {"name": "Rule 4", "if": ["high_magnitude", "inland"], "then": "severe_infrastructure_damage"},
+    {"name": "Rule 5", "if": ["severe_surface_shaking", "high_population_density"], "then": "mass_casualties_expected"},
+    {"name": "Rule 6", "if": ["severe_infrastructure_damage", "high_population_density"], "then": "widespread_homelessness"},
+    {"name": "Rule 7", "if": ["predicted_threat_level_is_low"], "then": "deploy_basic_supplies"},
+    {"name": "Rule 8", "if": ["mass_casualties_expected"], "then": "deploy_field_hospital"},
+    {"name": "Rule 9", "if": ["tsunami_warning_active"], "then": "deploy_navy_rescue_crafts"},
+    {"name": "Rule 10", "if": ["tsunami_warning_active"], "then": "initiate_coastal_evacuation_protocols"},
+    {"name": "Rule 11", "if": ["severe_infrastructure_damage"], "then": "deploy_heavy_rubble_clearance_vehicles"},
+    {"name": "Rule 12", "if": ["widespread_homelessness"], "then": "establish_displaced_persons_camp"},
+    {"name": "Rule 13", "if": ["mass_casualties_expected", "severe_infrastructure_damage"], "then": "request_international_medical_aid"}
+]
+
+
+# ==========================================
+# 5. DISASTER AGENT CLASS
 # ==========================================
 class DisasterResponseAgent:
     
@@ -191,6 +232,9 @@ class DisasterResponseAgent:
         self.airports = assets['apt_clean']
         self.cities = assets['cit_clean']
         self.historical_quakes = assets['historical_quakes']
+        
+        # === NEW: Initialize Knowledge Base ===
+        self.kbs_engine = ForwardChainingEngine(EARTHQUAKE_RULES)
 
     def _build_model_row(self, event, features):
         row = {f: event.get(f, 0) for f in features}
@@ -221,7 +265,7 @@ class DisasterResponseAgent:
         th_pred = self.assets['threat_model'].predict(th_scaled)[0]
         threat_label = self.assets['threat_le'].inverse_transform([th_pred])[0]
         
-        # NEW: Extract Threat Probabilities for the UI Chart
+        # Extract Threat Probabilities for the UI Chart
         th_probs = {}
         if hasattr(self.assets['threat_model'], 'predict_proba'):
             raw_probs = self.assets['threat_model'].predict_proba(th_scaled)[0]
@@ -244,9 +288,44 @@ class DisasterResponseAgent:
         nodes, adj, start_idx, goal_idx = build_graph(hub_row, goal_apt, self.airports)
         path, cost = astar(nodes, adj, start_idx, goal_idx)
         return hub_row, goal_apt, nodes, path, cost
+    
+    # === NEW: Telemetry Mapper for KBS ===
+    def _map_telemetry_to_facts(self, event, perception, goal_city):
+        """Translates raw model data into KBS logic facts."""
+        facts = set()
+        
+        if event.get('magnitude', 0) >= 7.0: facts.add("high_magnitude")
+        elif event.get('magnitude', 0) <= 5.5: facts.add("low_magnitude")
+            
+        if event.get('depth', 999) < 30.0: facts.add("shallow_depth")
+            
+        if not is_land(event.get('latitude', 0), event.get('longitude', 0)): facts.add("over_water")
+        else: facts.add("inland")
+            
+        if goal_city.get('population', 0) >= 500000: facts.add("high_population_density")
+        else: facts.add("low_population_density")
+            
+        if perception['threat_level'] == 'LOW': facts.add("predicted_threat_level_is_low")
+        if perception['tsunami_prediction'] == 1: facts.add("tsunami_warning_active")
+            
+        return facts
+
+    # === NEW: Execute KBS ===
+    def run_knowledge_base(self, event, perception, goal_city):
+        """Runs the Forward Chaining Engine and extracts operational protocols."""
+        initial_facts = self._map_telemetry_to_facts(event, perception, goal_city)
+        final_facts, trace = self.kbs_engine.infer(initial_facts)
+        
+        # Clean up the output string to easily display on frontend
+        actionable_deployments = [
+            fact.replace('_', ' ').title() 
+            for fact in final_facts 
+            if fact.startswith(("deploy_", "request_", "initiate_", "establish_"))
+        ]
+        
+        return trace, actionable_deployments
 
     def get_dispatch_details(self, perception, path):
-        """Returns clean data strings for the UI to display instead of printing to terminal."""
         threat = perception['threat_level']
         mode = self._classify_dispatch_mode(path)
         
@@ -266,17 +345,13 @@ class DisasterResponseAgent:
         return mode, mode_str, supplies
     
     def log_dispatch(self, event, perception, goal_city, hub_row, mode_str, cost, file_path='./data/dispatch_history.csv'):
-        """Appends the event inputs, agent decisions, and ML confidence scores to a permanent CSV log."""
-        
         import os
         import csv
         from datetime import datetime
         
-        # Ensure the data directory exists
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         file_exists = os.path.isfile(file_path)
         
-        # NEW: Expanded headers to include ML probabilities
         headers = [
             "timestamp", "latitude", "longitude", "magnitude", "depth_km", 
             "threat_level", "tsunami_risk", "target_city", "hub_iata", 
@@ -285,36 +360,26 @@ class DisasterResponseAgent:
             "prob_threat_HIGH", "prob_threat_CRITICAL"
         ]
         
-        # Safely extract the probabilities dictionary
         th_probs = perception.get('threat_probabilities', {})
         
-        # Format the data cleanly
         row = [
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            round(event['latitude'], 4), 
-            round(event['longitude'], 4), 
-            event['magnitude'], 
-            event['depth'],
+            round(event['latitude'], 4), round(event['longitude'], 4), 
+            event['magnitude'], event['depth'],
             perception['threat_level'],
             'YES' if perception['tsunami_prediction'] else 'NO',
             f"{goal_city['city']} ({goal_city['country']})",
-            hub_row['iata_code'],
-            mode_str,
+            hub_row['iata_code'], mode_str,
             round(cost, 0) if cost != float('inf') else 'Unreachable',
-            
-            # NEW: Add the raw ML probability scores rounded to 3 decimal places
             perception.get('tsunami_probability', 0.0),
-            round(th_probs.get('LOW', 0.0), 3),
-            round(th_probs.get('MEDIUM', 0.0), 3),
-            round(th_probs.get('HIGH', 0.0), 3),
-            round(th_probs.get('CRITICAL', 0.0), 3)
+            round(th_probs.get('LOW', 0.0), 3), round(th_probs.get('MEDIUM', 0.0), 3),
+            round(th_probs.get('HIGH', 0.0), 3), round(th_probs.get('CRITICAL', 0.0), 3)
         ]
         
-        # Append to CSV
         with open(file_path, mode='a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(headers) # Write column names if brand new file
+                writer.writerow(headers)
             writer.writerow(row)
 
     def display_map(self, event, perception, hub_row, goal_city, goal_apt, nodes, path, cost, mode, show_heatmap=False):
@@ -324,24 +389,19 @@ class DisasterResponseAgent:
 
         m = folium.Map(location=map_center, zoom_start=4, tiles='CartoDB positron')
 
-        # --- NEW: Heatmap Layer ---
         if show_heatmap:
             significant_quakes = self.historical_quakes[self.historical_quakes['magnitude'] >= 5.0]
-            
             heat_data = significant_quakes[['latitude', 'longitude', 'magnitude']].values.tolist()
-            
             HeatMap(heat_data, radius=12, blur=15, max_zoom=1).add_to(m)
 
-        # Epicentre
         folium.CircleMarker(
             location=[event['latitude'], event['longitude']], radius=18, color=threat_color, fill=True, fill_opacity=0.3, weight=2.5,
             tooltip=f"Epicentre — {threat}"
         ).add_to(m)
 
-        # --- NEW: Show all hubs, highlight active ---
         for _, hub in self.hubs.iterrows():
             is_active = hub['hub_id'] == hub_row['hub_id']
-            color = 'blue' if is_active else 'lightgray' # Active is blue, others gray
+            color = 'blue' if is_active else 'lightgray'
             icon_type = 'star' if is_active else 'plane'
             
             folium.Marker(
@@ -350,13 +410,11 @@ class DisasterResponseAgent:
                 tooltip=f"{'🌟 ACTIVE HUB: ' if is_active else 'Standby Hub: '}{hub['iata_code']}"
             ).add_to(m)
 
-        # Target City
         folium.Marker(
             location=[goal_city['lat'], goal_city['lng']], icon=folium.Icon(color='red', icon='home', prefix='fa'),
             tooltip=f"Target: {goal_city['city']}"
         ).add_to(m)
 
-        # Route Drawing (Same as before)
         if path and len(path) > 1:
             route_coords = [[nodes[i]['lat'], nodes[i]['lon']] for i in path]
             folium.PolyLine(locations=route_coords, color=threat_color, weight=4, opacity=0.85).add_to(m)
@@ -369,9 +427,7 @@ class DisasterResponseAgent:
         return m
     
     def generate_base_map(self):
-        """Generates the default map showing all standby hubs before an event occurs."""
         m = folium.Map(location=[20, 0], zoom_start=2, tiles='CartoDB positron')
-        
         for _, hub in self.hubs.iterrows():
             folium.Marker(
                 location=[hub['hub_lat'], hub['hub_lon']],

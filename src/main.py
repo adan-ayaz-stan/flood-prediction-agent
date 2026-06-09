@@ -91,6 +91,8 @@ with col2:
             hub_row, goal_apt, nodes, path, cost = agent.plan_route(simulated_event, goal_city)
             mode, mode_str, supplies = agent.get_dispatch_details(perception, path)
             
+            trace_logs, actionable_deployments = agent.run_knowledge_base(simulated_event, perception, goal_city)
+            
             agent.log_dispatch(simulated_event, perception, goal_city, hub_row, mode_str, cost)
             
             # Save the new map to state
@@ -105,7 +107,9 @@ with col2:
                 'tsunami': perception['tsunami_prediction'],
                 'target': f"{goal_city['city']} ({goal_city['country']})",
                 'hub': f"{hub_row['airport_name']} [{hub_row['iata_code']}]",
-                'path': path, 'cost': cost, 'mode_str': mode_str, 'supplies': supplies
+                'path': path, 'cost': cost, 'mode_str': mode_str, 'supplies': supplies,
+                'trace_logs': trace_logs,
+                'actionable_deployments': actionable_deployments
             }
             
         # Rerun the app instantly to display the new map smoothly
@@ -177,6 +181,26 @@ with col2:
         st.markdown("---")
         st.write(f"**🚚 Transport:** {d['mode_str']}")
         st.write(f"**📦 Supplies:** {d['supplies']}")
+        
+        st.markdown("---")
+        st.subheader("⚙️ Expert System (Forward Chaining)")
+        
+        # We use an expander so the raw trace logs don't overwhelm the UI
+        with st.expander("View Inference Engine Trace Log"):
+            # FIX: Use .get() to safely check for the key
+            if d.get('trace_logs'):
+                for step in d['trace_logs']:
+                    st.caption(f"✓ {step}")
+            else:
+                st.caption("No rules fired for these parameters (or waiting for fresh simulation).")
+                
+        st.write("**Tactical Deployments Ordered:**")
+        # FIX: Use .get() here as well
+        if d.get('actionable_deployments'):
+            for action in d['actionable_deployments']:
+                st.markdown(f"- 🚨 **{action}**")
+        else:
+            st.markdown("- No specialized tactical deployments required.")
         
         # Clear Button
         if st.button("Reset Simulation"):
