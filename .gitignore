@@ -13,3 +13,4 @@ data/
 # Ignore environment files
 .env
 
+models/
